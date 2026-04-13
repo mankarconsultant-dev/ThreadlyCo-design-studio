@@ -4,9 +4,10 @@
  * Selecting a design opens the approval panel with editable fields.
  * Approve pushes to Printify, Reject discards the design.
  */
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams, useNavigate, useOutletContext } from "react-router-dom";
 import axios from "axios";
+import html2canvas from "html2canvas";
 import { API } from "@/App";
 import { toast } from "sonner";
 import {
@@ -41,15 +42,34 @@ import {
   Palette,
   Type,
   ExternalLink,
+  Image,
 } from "lucide-react";
 
+/**
+ * Captures a DOM element as a base64 PNG string using html2canvas.
+ * Returns the base64 data (without the data:image/png;base64, prefix).
+ */
+async function captureElementAsPng(element) {
+  const canvas = await html2canvas(element, {
+    backgroundColor: null, // transparent background
+    scale: 2,              // higher resolution for print quality
+    useCORS: true,
+    logging: false,
+  });
+  // Convert to base64 PNG (strip the data URL prefix)
+  const dataUrl = canvas.toDataURL("image/png");
+  return dataUrl.split(",")[1]; // return just the base64 part
+}
+
 /* ─── Design Mockup Component ───────────────────────────────── */
-function DesignMockup({ design, productType, size = "normal" }) {
+/* captureRef: optional ref attached for html2canvas capture */
+function DesignMockup({ design, productType, size = "normal", captureRef }) {
   const colors = design?.colors || ["#1a1a2e", "#3D7A5F", "#ffffff"];
   const isSmall = size === "small";
 
   return (
     <div
+      ref={captureRef}
       className={`relative overflow-hidden rounded-xl border border-white/10 ${
         isSmall ? "w-full aspect-square" : "w-full aspect-[3/4]"
       }`}
@@ -151,7 +171,7 @@ function DesignCard({ design, productType, isSelected, onSelect, index }) {
 }
 
 /* ─── Approval Panel (Right Side) ────────────────────────────── */
-function ApprovalPanel({ design, productType, onApprove, onReject, onPushToPrintify, approving, pushing, prices, compareAtMarkup }) {
+function ApprovalPanel({ design, productType, onApprove, onReject, approving, pushing, prices, compareAtMarkup, capturing }) {
   const basePrice = getPriceForProduct(productType, prices);
   const compareAt = getCompareAtPrice(basePrice, compareAtMarkup);
 
@@ -327,13 +347,21 @@ function ApprovalPanel({ design, productType, onApprove, onReject, onPushToPrint
       <div className="flex gap-3 mt-6 pt-5 border-t border-white/5">
         <Button
           onClick={handleApprove}
-          disabled={approving || pushing}
+          disabled={approving || pushing || capturing}
           data-testid="approve-push-button"
           className="flex-1 h-11 bg-[#3D7A5F] hover:bg-[#4F9B7A] text-white font-bold rounded-xl shadow-[0_0_15px_rgba(61,122,95,0.3)] transition-all"
         >
-          {approving ? (
+          {capturing ? (
+            <span className="flex items-center gap-2">
+              <Loader2 className="w-4 h-4 animate-spin" /> Capturing design...
+            </span>
+          ) : approving ? (
             <span className="flex items-center gap-2">
               <Loader2 className="w-4 h-4 animate-spin" /> Approving...
+            </span>
+          ) : pushing ? (
+            <span className="flex items-center gap-2">
+              <Loader2 className="w-4 h-4 animate-spin" /> Pushing to Printify...
             </span>
           ) : (
             <span className="flex items-center gap-2">
@@ -368,9 +396,13 @@ export default function DesignGenerator() {
   const [generating, setGenerating] = useState(false);
   const [approving, setApproving] = useState(false);
   const [pushing, setPushing] = useState(false);
+  const [capturing, setCapturing] = useState(false);
   const [prices, setPrices] = useState(DEFAULT_PRICES);
   const [compareAtMarkup, setCompareAtMarkup] = useState(20);
   const [pushResult, setPushResult] = useState(null);
+
+  // Ref for the selected design mockup (used by html2canvas)
+  const mockupCaptureRef = useRef(null);
 
   // Load settings for prices
   useEffect(() => {
@@ -408,16 +440,37 @@ export default function DesignGenerator() {
     }
   };
 
-  /* Approve design and optionally push to Printify */
+  /* Approve design: capture mockup as PNG, then approve and push to Printify */
   const handleApprove = async (productData) => {
+    // Step 1: Capture the design mockup as a base64 PNG
+    let designImageBase64 = null;
+    if (mockupCaptureRef.current) {
+      try {
+        setCapturing(true);
+        toast.info("Capturing design as PNG...");
+        designImageBase64 = await captureElementAsPng(mockupCaptureRef.current);
+        toast.success("Design captured successfully!");
+      } catch (err) {
+        console.error("Failed to capture design:", err);
+        toast.error("Failed to capture design image. Proceeding without image.");
+      } finally {
+        setCapturing(false);
+      }
+    }
+
+    // Step 2: Approve the product (include the captured image)
     setApproving(true);
     try {
-      const { data } = await axios.post(`${API}/products/approve`, productData, { headers: authHeaders });
+      const payload = {
+        ...productData,
+        design_image_base64: designImageBase64,
+      };
+      const { data } = await axios.post(`${API}/products/approve`, payload, { headers: authHeaders });
       toast.success("Design approved!");
       fetchStats();
       fetchProducts();
 
-      // Try to push to Printify if configured
+      // Step 3: Push to Printify (backend will upload the image first)
       try {
         setPushing(true);
         const pushResp = await axios.post(
@@ -426,7 +479,7 @@ export default function DesignGenerator() {
           { headers: authHeaders }
         );
         setPushResult(pushResp.data);
-        toast.success("Product pushed to Printify!");
+        toast.success("Product pushed to Printify with design image!");
         fetchStats();
         fetchProducts();
       } catch (pushErr) {
@@ -565,9 +618,17 @@ export default function DesignGenerator() {
         <div className="w-full lg:w-96 shrink-0">
           {selectedDesign ? (
             <>
-              {/* Selected Design Preview */}
+              {/* Selected Design Preview (this is the element captured by html2canvas) */}
               <div className="mb-4">
-                <DesignMockup design={selectedDesign} productType={productType} />
+                <DesignMockup design={selectedDesign} productType={productType} captureRef={mockupCaptureRef} />
+              </div>
+
+              {/* Image capture indicator */}
+              <div className="mb-3 flex items-center gap-2 px-1">
+                <Image className="w-3.5 h-3.5 text-[#3D7A5F]" strokeWidth={1.5} />
+                <span className="text-xs text-slate-400">
+                  Design will be captured as PNG and uploaded to Printify
+                </span>
               </div>
 
               {/* Push Result */}
@@ -602,9 +663,9 @@ export default function DesignGenerator() {
                   productType={productType}
                   onApprove={handleApprove}
                   onReject={handleReject}
-                  onPushToPrintify={() => {}}
                   approving={approving}
                   pushing={pushing}
+                  capturing={capturing}
                   prices={prices}
                   compareAtMarkup={compareAtMarkup}
                 />

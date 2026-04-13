@@ -75,6 +75,7 @@ class ApproveProductRequest(BaseModel):
     selling_price: float
     compare_at_price: float
     variants: Optional[List[str]] = None
+    design_image_base64: Optional[str] = None  # Base64 PNG captured from the CSS mockup
 
 class NicheCreate(BaseModel):
     name: str
@@ -221,9 +222,9 @@ async def startup():
     creds_dir = Path("/app/memory")
     creds_dir.mkdir(exist_ok=True)
     with open(creds_dir / "test_credentials.md", "w") as f:
-        f.write(f"# Test Credentials\n\n")
+        f.write("# Test Credentials\n\n")
         f.write(f"## Admin\n- Email: {ADMIN_EMAIL}\n- Password: {ADMIN_PASSWORD}\n- Role: admin\n\n")
-        f.write(f"## Auth Endpoints\n- POST /api/auth/login\n- POST /api/auth/logout\n- GET /api/auth/me\n")
+        f.write("## Auth Endpoints\n- POST /api/auth/login\n- POST /api/auth/logout\n- GET /api/auth/me\n")
 
 # ─── AUTH ROUTES ─────────────────────────────────────────────────
 
@@ -364,7 +365,7 @@ Return ONLY the JSON array, no markdown, no explanation."""
 
 @api_router.post("/products/approve")
 async def approve_product(req: ApproveProductRequest, user: dict = Depends(get_current_user)):
-    """Approve a design and store it. Optionally push to Printify if configured."""
+    """Approve a design and store it. Stores the captured design image for Printify upload."""
     product = {
         "id": str(uuid.uuid4()),
         "design": req.design,
@@ -375,8 +376,10 @@ async def approve_product(req: ApproveProductRequest, user: dict = Depends(get_c
         "selling_price": req.selling_price,
         "compare_at_price": req.compare_at_price,
         "variants": req.variants or [],
+        "design_image_base64": req.design_image_base64,  # Store captured PNG for Printify upload
         "status": "approved",
         "printify_product_id": None,
+        "printify_image_id": None,
         "printify_url": None,
         "approved_at": datetime.now(timezone.utc).isoformat(),
         "approved_by": user["_id"]
@@ -395,8 +398,8 @@ async def approve_product(req: ApproveProductRequest, user: dict = Depends(get_c
 @api_router.post("/products/{product_id}/push-to-printify")
 async def push_to_printify(product_id: str, user: dict = Depends(get_current_user)):
     """
-    Push an approved product to Printify.
-    Creates the product in the user's Printify store and publishes it.
+    Push an approved product to Printify with the actual design image.
+    Flow: Upload design PNG → Create product with image → Publish product.
     """
     # Get settings for Printify credentials
     settings = await db.settings.find_one({"type": "global"}, {"_id": 0})
@@ -433,11 +436,42 @@ async def push_to_printify(product_id: str, user: dict = Depends(get_current_use
 
     # Calculate prices in cents
     selling_price_cents = int(product["selling_price"] * 100)
-    compare_at_cents = int(product["compare_at_price"] * 100)
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client_http:
-            # Get print providers for this blueprint
+        async with httpx.AsyncClient(timeout=60) as client_http:
+
+            # ─── Step 1: Upload the design image to Printify ─────────
+            printify_image_id = None
+            design_image_base64 = product.get("design_image_base64")
+
+            if design_image_base64:
+                logger.info("Uploading design image to Printify...")
+                upload_payload = {
+                    "file_name": f"design_{product_id}.png",
+                    "contents": design_image_base64
+                }
+                upload_resp = await client_http.post(
+                    f"{base_url}/uploads/images.json",
+                    headers=headers,
+                    json=upload_payload
+                )
+
+                if upload_resp.status_code in [200, 201]:
+                    upload_data = upload_resp.json()
+                    printify_image_id = upload_data.get("id")
+                    logger.info(f"Design image uploaded to Printify. Image ID: {printify_image_id}")
+
+                    # Store the image ID in our DB for reference
+                    await db.products.update_one(
+                        {"id": product_id},
+                        {"$set": {"printify_image_id": printify_image_id}}
+                    )
+                else:
+                    logger.warning(f"Failed to upload image to Printify: {upload_resp.status_code} - {upload_resp.text}")
+            else:
+                logger.warning("No design image found for product. Creating product without image.")
+
+            # ─── Step 2: Get print providers and variants ────────────
             providers_resp = await client_http.get(
                 f"{base_url}/catalog/blueprints/{blueprint_id}/print_providers.json",
                 headers=headers
@@ -452,7 +486,6 @@ async def push_to_printify(product_id: str, user: dict = Depends(get_current_use
 
             provider_id = providers[0]["id"]
 
-            # Get variants for this provider
             variants_resp = await client_http.get(
                 f"{base_url}/catalog/blueprints/{blueprint_id}/print_providers/{provider_id}/variants.json",
                 headers=headers
@@ -464,7 +497,42 @@ async def push_to_printify(product_id: str, user: dict = Depends(get_current_use
             variants_data = variants_resp.json()
             variant_ids = [v["id"] for v in variants_data.get("variants", [])[:5]]
 
-            # Create product payload
+            # ─── Step 3: Build print_areas with the uploaded image ───
+            # If we have a Printify image ID, use it. Otherwise use a placeholder.
+            if printify_image_id:
+                print_areas = [
+                    {
+                        "variant_ids": variant_ids,
+                        "placeholders": [
+                            {
+                                "position": "front",
+                                "images": [
+                                    {
+                                        "id": printify_image_id,
+                                        "x": 0.5,
+                                        "y": 0.5,
+                                        "scale": 1,
+                                        "angle": 0
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            else:
+                print_areas = [
+                    {
+                        "variant_ids": variant_ids,
+                        "placeholders": [
+                            {
+                                "position": "front",
+                                "images": []
+                            }
+                        ]
+                    }
+                ]
+
+            # ─── Step 4: Create the product on Printify ──────────────
             product_payload = {
                 "title": product["product_title"],
                 "description": product["product_description"],
@@ -479,27 +547,9 @@ async def push_to_printify(product_id: str, user: dict = Depends(get_current_use
                     for vid in variant_ids
                 ],
                 "tags": product.get("tags", []),
-                "print_areas": [
-                    {
-                        "variant_ids": variant_ids,
-                        "placeholders": [
-                            {
-                                "position": "front",
-                                "images": [
-                                    {
-                                        "id": "placeholder",
-                                        "x": 0.5, "y": 0.5,
-                                        "scale": 1,
-                                        "angle": 0
-                                    }
-                                ]
-                            }
-                        ]
-                    }
-                ]
+                "print_areas": print_areas
             }
 
-            # Create product on Printify
             create_resp = await client_http.post(
                 f"{base_url}/shops/{shop_id}/products.json",
                 headers=headers,
@@ -512,7 +562,7 @@ async def push_to_printify(product_id: str, user: dict = Depends(get_current_use
             printify_product = create_resp.json()
             printify_product_id = printify_product.get("id", "")
 
-            # Publish the product
+            # ─── Step 5: Publish the product ─────────────────────────
             publish_payload = {
                 "title": True,
                 "description": True,
@@ -523,13 +573,13 @@ async def push_to_printify(product_id: str, user: dict = Depends(get_current_use
                 "shipping_template": True
             }
 
-            publish_resp = await client_http.post(
+            await client_http.post(
                 f"{base_url}/shops/{shop_id}/products/{printify_product_id}/publish.json",
                 headers=headers,
                 json=publish_payload
             )
 
-            # Update product in our DB
+            # ─── Step 6: Update our DB ───────────────────────────────
             await db.products.update_one(
                 {"id": product_id},
                 {"$set": {
@@ -546,11 +596,15 @@ async def push_to_printify(product_id: str, user: dict = Depends(get_current_use
                 upsert=True
             )
 
+            image_status = "with design image" if printify_image_id else "without design image (no image captured)"
+
             return {
-                "message": "Product successfully pushed to Printify!",
+                "message": f"Product successfully pushed to Printify {image_status}!",
                 "printify_product_id": printify_product_id,
+                "printify_image_id": printify_image_id,
                 "printify_url": f"https://printify.com/app/editor/{printify_product_id}",
-                "status": "pushed"
+                "status": "pushed",
+                "has_design_image": printify_image_id is not None
             }
 
     except httpx.HTTPError as e:

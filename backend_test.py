@@ -167,6 +167,42 @@ class ThreadlyCoAPITester:
             return True, product_id
         return False, ""
 
+    def test_approve_product_with_image(self, design: dict) -> tuple[bool, str]:
+        """Test product approval with base64 image capture (NEW FEATURE)"""
+        # Sample base64 PNG data (1x1 transparent pixel)
+        sample_base64_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChAI9jU77zgAAAABJRU5ErkJggg=="
+        
+        product_data = {
+            "design": design,
+            "product_title": f"Test Product with Image - {design.get('title', 'Unknown')}",
+            "product_description": "Test product with captured design image for automated testing",
+            "tags": ["test", "automation", "threadlyco", "image-capture"],
+            "product_type": design.get('product_type', 'T-Shirt'),
+            "selling_price": 24.99,
+            "compare_at_price": 29.99,
+            "variants": ["Black", "White"],
+            "design_image_base64": sample_base64_png  # NEW: Include captured image
+        }
+        
+        success, response = self.run_test(
+            "Approve Product with Image",
+            "POST",
+            "/products/approve",
+            200,
+            data=product_data
+        )
+        
+        if success and response.get('id'):
+            product_id = response['id']
+            # Verify the image was stored
+            if response.get('design_image_base64') == sample_base64_png:
+                self.log(f"✅ Product approved with image capture - ID: {product_id}")
+                return True, product_id
+            else:
+                self.log(f"⚠️  Product approved but image not stored correctly")
+                return True, product_id
+        return False, ""
+
     def test_get_products(self) -> tuple[bool, list]:
         """Test fetching products"""
         success, response = self.run_test("Get Products", "GET", "/products", 200)
@@ -248,6 +284,7 @@ class ThreadlyCoAPITester:
             "stats": False,
             "design_generation": False,
             "product_approval": False,
+            "product_approval_with_image": False,  # NEW: Test image capture
             "products": False,
             "settings": False,
             "settings_update": False,
@@ -280,11 +317,18 @@ class ThreadlyCoAPITester:
             results["design_generation"], designs = self.test_generate_designs(test_niche)
             
             if results["design_generation"] and designs:
-                # Test product approval with first design
+                # Test regular product approval
                 results["product_approval"], product_id = self.test_approve_product(designs[0])
                 
-                if results["product_approval"] and product_id:
-                    # Test Printify push (expected to fail without API key)
+                # NEW: Test product approval with image capture
+                if len(designs) > 1:
+                    results["product_approval_with_image"], image_product_id = self.test_approve_product_with_image(designs[1])
+                    
+                    # Test Printify push with image (use the image product if available)
+                    push_product_id = image_product_id if image_product_id else product_id
+                    if push_product_id:
+                        results["printify_push"] = self.test_push_to_printify(push_product_id)
+                elif product_id:
                     results["printify_push"] = self.test_push_to_printify(product_id)
 
         # 5. Products and settings
