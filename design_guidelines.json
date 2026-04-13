@@ -1,0 +1,81 @@
+{
+  "theme": "dark",
+  "archetype": "Archetype 5: Jewel & Luxury (Adapted for Dark Tactical Dashboard)",
+  "global_styles": {
+    "background_color": "#050814",
+    "surface_color": "#0B1120",
+    "border_color": "rgba(255, 255, 255, 0.08)",
+    "text_primary": "#FFFFFF",
+    "text_secondary": "#94A3B8"
+  },
+  "colors": {
+    "brand": {
+      "DEFAULT": "#3D7A5F",
+      "hover": "#4F9B7A",
+      "active": "#2D5C47",
+      "foreground": "#FFFFFF"
+    },
+    "background": "#050814",
+    "card": "#0B1120",
+    "border": "#1E293B",
+    "heat_levels": {
+      "hot": "#EF4444",
+      "rising": "#F59E0B",
+      "steady": "#3B82F6"
+    }
+  },
+  "typography": {
+    "font_family": {
+      "heading": "Raleway, sans-serif",
+      "body": "Jost, sans-serif",
+      "mono": "JetBrains Mono, monospace"
+    },
+    "scale": {
+      "h1": "text-4xl sm:text-5xl font-black tracking-tighter text-white",
+      "h2": "text-2xl sm:text-3xl font-bold tracking-tight text-white",
+      "h3": "text-xl sm:text-2xl font-semibold text-white",
+      "body": "text-base font-normal text-slate-400 leading-relaxed",
+      "label": "text-xs font-semibold uppercase tracking-[0.2em] text-slate-500"
+    }
+  },
+  "surfaces_and_containers": {
+    "cards": "bg-[#0B1120] border border-white/5 rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.4)] p-6 hover:-translate-y-1 hover:border-white/10 transition-all duration-300",
+    "glass_header": "bg-[#050814]/70 backdrop-blur-xl border-b border-white/5 sticky top-0 z-50",
+    "inputs": "bg-[#050814] border border-white/10 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-[#3D7A5F] focus:border-transparent transition-all",
+    "buttons": {
+      "primary": "bg-[#3D7A5F] hover:bg-[#4F9B7A] text-white font-bold tracking-wide rounded-xl px-6 py-3 transition-colors shadow-[0_0_15px_rgba(61,122,95,0.3)]",
+      "secondary": "bg-transparent border border-white/10 hover:bg-white/5 text-white font-semibold rounded-xl px-6 py-3 transition-all",
+      "danger": "bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500/20 rounded-xl px-6 py-3"
+    }
+  },
+  "layout": {
+    "grid_system": "Control Room Protocol: grid-cols-1 md:grid-cols-2 lg:grid-cols-4 with gap-6. Highly dense but breathable.",
+    "spacing": "Generous internal padding (p-6, p-8). Keep a minimum of gap-6 between structural sections."
+  },
+  "media": {
+    "backgrounds": {
+      "dashboard_bg": "https://static.prod-images.emergentagent.com/jobs/e68c7f77-7ff1-45ff-b6f7-018f773a1d07/images/f74070730a3f57fa551b8674de3b92ba354604bc8a5a8d67a7926ec3a5486755.png"
+    },
+    "images": {
+      "avatar": "https://images.unsplash.com/photo-1601455763557-db1bea8a9a5a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2OTV8MHwxfHNlYXJjaHwxfHxhdmF0YXIlMjBwb3J0cmFpdHxlbnwwfHx8fDE3NzYwOTQ0MTF8MA&ixlib=rb-4.1.0&q=85",
+      "tshirt_mockup": "https://images.unsplash.com/photo-1657364890995-1ec4bb3aefcf?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1ODR8MHwxfHNlYXJjaHwxfHxibGFjayUyMHQtc2hpcnQlMjBtb2NrdXB8ZW58MHx8fHwxNzc2MDk0NDExfDA&ixlib=rb-4.1.0&q=85",
+      "hoodie_mockup": "https://images.unsplash.com/photo-1634032188532-f11af97817ab?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2MjJ8MHwxfHNlYXJjaHwxfHxibGFjayUyMGhvb2RpZSUyMG1vY2t1cHxlbnwwfHx8fDE3NzYwOTQ0MTF8MA&ixlib=rb-4.1.0&q=85"
+    }
+  },
+  "components_instructions": {
+    "icons": "Use lucide-react. Keep stroke width 1.5 for a clean premium look.",
+    "stats_dashboard": "Top row bento-style stats cards. Use glass-like subtle borders, large Raleway numbers, and Jost labels.",
+    "page_1_trend_explorer": "Bento Grid for niches. Top search bar with dark UI styling. Heat level badges with glowing dots. Filter toggles.",
+    "page_2_design_generator": "Show selected niche context. Left: mockups (use absolute positioning for design overlay on the blank mockup). Right: configuration panel + 'Generate Designs' CTA that triggers a skeleton loading grid.",
+    "page_3_approve_push": "Split view: Design preview on left, deeply editable SEO metadata and Pricing settings on right. Show the original/discount pricing logic. 'Approve & Push' and 'Reject' actions prominently.",
+    "settings_page": "Clean settings cards for Printify API Key, Shop ID, global discount code, and base margins. Fields should look like secure inputs.",
+    "sidebar_log": "A narrow right-side or collapsible drawer showing previously pushed products in a sleek list."
+  },
+  "testing": {
+    "data_testid": "CRITICAL: All interactive elements (buttons, nav links, form inputs, toggles, heat-filters) MUST have a data-testid attribute formatted as kebab-case, describing its role."
+  },
+  "development_rules": {
+    "fonts_installation": "Add Google Fonts link for Raleway and Jost in index.html.",
+    "config_file": "Store pricing, margins, API endpoints, and dummy AI endpoints in a centralized config.js file as requested by the user."
+  }
+}
