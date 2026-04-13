@@ -26,6 +26,9 @@ from datetime import datetime, timezone, timedelta
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from emergentintegrations.llm.chat import LlmChat, UserMessage
+from emergentintegrations.llm.openai.image_generation import OpenAIImageGeneration
+import base64
+import asyncio
 
 # ─── Configuration ───────────────────────────────────────────────
 MONGO_URL = os.environ['MONGO_URL']
@@ -286,8 +289,9 @@ async def create_niche(niche: NicheCreate, user: dict = Depends(get_current_user
 @api_router.post("/designs/generate")
 async def generate_designs(req: GenerateDesignsRequest, user: dict = Depends(get_current_user)):
     """
-    Generate 5 design concepts using Claude AI for a given niche and product type.
-    Returns structured JSON with design details for rendering mockups.
+    Phase 1: Generate 5 design concepts using Claude AI (fast, ~15s).
+    Returns concepts immediately. Then kicks off background image generation.
+    Frontend polls /api/designs/{id}/image to check when images are ready.
     """
     if not EMERGENT_LLM_KEY:
         raise HTTPException(status_code=500, detail="AI API key not configured")
@@ -306,6 +310,7 @@ Return ONLY valid JSON array with exactly 5 objects. Each object must have:
 - "mood": design mood (e.g. "Edgy", "Playful", "Minimalist", "Vintage", "Bold")
 - "style": design style category ("Bold", "Minimal", "Vintage", "Retro", "Grunge", "Elegant", "Playful")
 - "tags": array of 5 relevant SEO tags
+- "image_prompt": a detailed prompt to generate the actual graphic design image (describe the visual: artwork style, graphic elements, text placement, color palette, mood). This should be a complete image generation prompt that creates a print-ready design for a {req.product_type}.
 
 Return ONLY the JSON array, no markdown, no explanation."""
 
@@ -320,8 +325,6 @@ Return ONLY the JSON array, no markdown, no explanation."""
         user_message = UserMessage(text=prompt)
         response_text = await chat.send_message(user_message)
 
-        # Parse the JSON response
-        # Clean up response - remove markdown code blocks if present
         cleaned = response_text.strip()
         if cleaned.startswith("```"):
             cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
@@ -333,15 +336,18 @@ Return ONLY the JSON array, no markdown, no explanation."""
 
         designs = json.loads(cleaned)
 
-        # Add unique IDs and metadata to each design
         for i, design in enumerate(designs):
             design["id"] = str(uuid.uuid4())
             design["niche"] = req.niche
             design["product_type"] = req.product_type
             design["created_at"] = datetime.now(timezone.utc).isoformat()
+            design["has_image"] = False  # Will be set to True when background job completes
+            design["image_status"] = "generating"  # generating | ready | failed
 
-        # Store designs in DB and update stats
-        await db.designs.insert_many([{**d} for d in designs])
+        # Store designs in DB
+        for d in designs:
+            await db.designs.insert_one({**d})
+
         await db.stats.update_one(
             {"type": "global"},
             {"$inc": {"total_generated": len(designs)}},
@@ -352,7 +358,28 @@ Return ONLY the JSON array, no markdown, no explanation."""
         for d in designs:
             d.pop("_id", None)
 
-        return {"designs": designs}
+        # ─── Kick off background image generation ────────────────────
+        design_ids_and_prompts = []
+        for d in designs:
+            design_ids_and_prompts.append({
+                "id": d["id"],
+                "title": d["title"],
+                "image_prompt": d.get("image_prompt", ""),
+                "style": d.get("style", "Bold"),
+                "mood": d.get("mood", "modern"),
+                "design_text": d.get("design_text", ""),
+                "colors": d.get("colors", ["#000", "#fff"]),
+                "layout": d.get("layout", ""),
+                "product_type": req.product_type,
+            })
+
+        # Fire and forget background task
+        asyncio.create_task(
+            _generate_images_background(design_ids_and_prompts)
+        )
+
+        logger.info(f"Returned {len(designs)} design concepts. Image generation started in background.")
+        return {"designs": designs, "images_generating": True}
 
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse AI response: {e}")
@@ -361,11 +388,75 @@ Return ONLY the JSON array, no markdown, no explanation."""
         logger.error(f"Design generation error: {e}")
         raise HTTPException(status_code=500, detail=f"Design generation failed: {str(e)}")
 
+
+async def _generate_images_background(design_items: list):
+    """Background task: generate AI images for each design and store in MongoDB."""
+    logger.info(f"Background: Starting image generation for {len(design_items)} designs...")
+    image_gen = OpenAIImageGeneration(api_key=EMERGENT_LLM_KEY)
+
+    async def generate_one(item):
+        design_id = item["id"]
+        try:
+            img_prompt = item.get("image_prompt", "")
+            if not img_prompt:
+                img_prompt = f"A {item['style']} graphic design for a {item['product_type']} with the text '{item['design_text']}'. Style: {item['mood']}. Colors: {', '.join(item['colors'])}. {item['layout']}."
+
+            full_prompt = f"Create a professional print-on-demand {item['product_type']} graphic design. {img_prompt}. The design should be print-ready, high contrast, centered composition, suitable for fabric/product printing. No mockup, just the design artwork itself on a solid or simple background."
+
+            images = await image_gen.generate_images(
+                prompt=full_prompt,
+                model="gpt-image-1",
+                number_of_images=1
+            )
+            if images and len(images) > 0:
+                img_b64 = base64.b64encode(images[0]).decode('utf-8')
+                await db.design_images.insert_one({
+                    "design_id": design_id,
+                    "image_base64": img_b64,
+                    "created_at": datetime.now(timezone.utc).isoformat()
+                })
+                await db.designs.update_one(
+                    {"id": design_id},
+                    {"$set": {"has_image": True, "image_status": "ready"}}
+                )
+                logger.info(f"Background: Image ready for '{item['title']}'")
+            else:
+                await db.designs.update_one(
+                    {"id": design_id},
+                    {"$set": {"image_status": "failed"}}
+                )
+        except Exception as e:
+            logger.error(f"Background: Image failed for '{item['title']}': {e}")
+            await db.designs.update_one(
+                {"id": design_id},
+                {"$set": {"image_status": "failed"}}
+            )
+
+    await asyncio.gather(*[generate_one(item) for item in design_items])
+    logger.info("Background: All image generation complete.")
+
+# ─── DESIGN IMAGE ENDPOINT ──────────────────────────────────────
+
+@api_router.get("/designs/{design_id}/image")
+async def get_design_image(design_id: str, user: dict = Depends(get_current_user)):
+    """Serve a design's AI-generated image as base64. Used by frontend to load images individually."""
+    img_doc = await db.design_images.find_one({"design_id": design_id}, {"_id": 0})
+    if not img_doc or not img_doc.get("image_base64"):
+        raise HTTPException(status_code=404, detail="Image not found for this design")
+    return {"design_id": design_id, "image_base64": img_doc["image_base64"]}
+
 # ─── PRODUCT / PRINTIFY ROUTES ──────────────────────────────────
 
 @api_router.post("/products/approve")
 async def approve_product(req: ApproveProductRequest, user: dict = Depends(get_current_user)):
-    """Approve a design and store it. Stores the captured design image for Printify upload."""
+    """Approve a design and store it. Fetches the AI image from DB for Printify upload."""
+    # If no image provided in request, try to fetch from design_images collection
+    image_b64 = req.design_image_base64
+    if not image_b64 and req.design.get("id"):
+        img_doc = await db.design_images.find_one({"design_id": req.design["id"]}, {"_id": 0})
+        if img_doc:
+            image_b64 = img_doc.get("image_base64")
+
     product = {
         "id": str(uuid.uuid4()),
         "design": req.design,
@@ -376,7 +467,8 @@ async def approve_product(req: ApproveProductRequest, user: dict = Depends(get_c
         "selling_price": req.selling_price,
         "compare_at_price": req.compare_at_price,
         "variants": req.variants or [],
-        "design_image_base64": req.design_image_base64,  # Store captured PNG for Printify upload
+        "design_image_base64": image_b64,
+        "has_design_image": image_b64 is not None,
         "status": "approved",
         "printify_product_id": None,
         "printify_image_id": None,
@@ -393,6 +485,8 @@ async def approve_product(req: ApproveProductRequest, user: dict = Depends(get_c
     )
 
     product.pop("_id", None)
+    # Don't return the large base64 in the approval response
+    product.pop("design_image_base64", None)
     return product
 
 @api_router.post("/products/{product_id}/push-to-printify")
