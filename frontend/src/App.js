@@ -1,53 +1,139 @@
-import { useEffect } from "react";
+import { useState, useEffect, createContext, useContext, useCallback } from "react";
 import "@/App.css";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
 import axios from "axios";
+import { Toaster } from "@/components/ui/sonner";
 
+import LoginPage from "@/pages/LoginPage";
+import Layout from "@/components/Layout";
+import TrendExplorer from "@/pages/TrendExplorer";
+import DesignGenerator from "@/pages/DesignGenerator";
+import SettingsPage from "@/pages/SettingsPage";
+
+/* ─── API Setup ──────────────────────────────────────────────── */
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+export const API = `${BACKEND_URL}/api`;
 
-const Home = () => {
-  const helloWorldApi = async () => {
+// Configure axios to send cookies with every request
+axios.defaults.withCredentials = true;
+
+/* ─── Auth Context ───────────────────────────────────────────── */
+export const AuthContext = createContext(null);
+
+export const useAuth = () => useContext(AuthContext);
+
+function AuthProvider({ children }) {
+  // null = checking, false = not authenticated, object = user
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const checkAuth = useCallback(async () => {
     try {
-      const response = await axios.get(`${API}/`);
-      console.log(response.data.message);
-    } catch (e) {
-      console.error(e, `errored out requesting / api`);
+      const token = localStorage.getItem("token");
+      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      const { data } = await axios.get(`${API}/auth/me`, { headers });
+      setUser(data);
+    } catch {
+      setUser(false);
+      localStorage.removeItem("token");
+    } finally {
+      setLoading(false);
     }
-  };
-
-  useEffect(() => {
-    helloWorldApi();
   }, []);
 
+  useEffect(() => {
+    checkAuth();
+  }, [checkAuth]);
+
+  const login = async (email, password) => {
+    const { data } = await axios.post(`${API}/auth/login`, { email, password });
+    if (data.token) {
+      localStorage.setItem("token", data.token);
+    }
+    setUser(data);
+    return data;
+  };
+
+  const logout = async () => {
+    try {
+      await axios.post(`${API}/auth/logout`);
+    } catch { /* ignore */ }
+    localStorage.removeItem("token");
+    setUser(false);
+  };
+
   return (
-    <div>
-      <header className="App-header">
-        <a
-          className="App-link"
-          href="https://emergent.sh"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <img src="https://avatars.githubusercontent.com/in/1201222?s=120&u=2686cf91179bbafbc7a71bfbc43004cf9ae1acea&v=4" />
-        </a>
-        <p className="mt-5">Building something incredible ~!</p>
-      </header>
-    </div>
+    <AuthContext.Provider value={{ user, loading, login, logout, checkAuth }}>
+      {children}
+    </AuthContext.Provider>
   );
-};
+}
+
+/* ─── Protected Route ────────────────────────────────────────── */
+function ProtectedRoute({ children }) {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#050814]">
+        <div className="w-8 h-8 border-2 border-[#3D7A5F] border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (!user || user === false) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return children;
+}
+
+/* ─── App Component ──────────────────────────────────────────── */
+function AppRoutes() {
+  const { user } = useAuth();
+  const location = useLocation();
+
+  return (
+    <Routes>
+      <Route
+        path="/login"
+        element={user && user !== false ? <Navigate to="/" replace /> : <LoginPage />}
+      />
+      <Route
+        path="/"
+        element={
+          <ProtectedRoute>
+            <Layout />
+          </ProtectedRoute>
+        }
+      >
+        <Route index element={<TrendExplorer />} />
+        <Route path="design/:nicheName" element={<DesignGenerator />} />
+        <Route path="settings" element={<SettingsPage />} />
+      </Route>
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  );
+}
 
 function App() {
   return (
-    <div className="App">
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Home />}>
-            <Route index element={<Home />} />
-          </Route>
-        </Routes>
-      </BrowserRouter>
-    </div>
+    <BrowserRouter>
+      <AuthProvider>
+        <AppRoutes />
+        <Toaster
+          position="top-right"
+          toastOptions={{
+            style: {
+              background: "#0B1120",
+              border: "1px solid rgba(255,255,255,0.1)",
+              color: "#fff",
+              fontFamily: "Jost, sans-serif",
+            },
+          }}
+        />
+      </AuthProvider>
+    </BrowserRouter>
   );
 }
 
