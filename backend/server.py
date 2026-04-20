@@ -389,6 +389,30 @@ Return ONLY the JSON array, no markdown, no explanation."""
         raise HTTPException(status_code=500, detail=f"Design generation failed: {str(e)}")
 
 
+async def _remove_background(image_bytes: bytes) -> bytes:
+    """Remove background from image using Remove.bg API. Falls back to original if it fails."""
+    removebg_api_key = os.environ.get('REMOVEBG_API_KEY', '')
+    if not removebg_api_key:
+        logger.warning("REMOVEBG_API_KEY not set - skipping background removal")
+        return image_bytes
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client_http:
+            resp = await client_http.post(
+                "https://api.remove.bg/v1.0/removebg",
+                headers={"X-Api-Key": removebg_api_key},
+                files={"image_file": ("design.png", image_bytes, "image/png")},
+                data={"size": "auto", "format": "png"}
+            )
+            if resp.status_code == 200:
+                logger.info("Background removed successfully")
+                return resp.content  # Returns PNG with transparent background
+            else:
+                logger.warning(f"Remove.bg failed: {resp.status_code} - {resp.text[:200]}")
+                return image_bytes  # Fall back to original
+    except Exception as e:
+        logger.error(f"Background removal error: {e}")
+        return image_bytes  # Fall back to original
 async def _generate_images_background(design_items: list):
     """Background task: generate AI images for each design and store in MongoDB."""
     logger.info(f"Background: Starting image generation for {len(design_items)} designs...")
@@ -401,15 +425,16 @@ async def _generate_images_background(design_items: list):
             if not img_prompt:
                 img_prompt = f"A {item['style']} graphic design for a {item['product_type']} with the text '{item['design_text']}'. Style: {item['mood']}. Colors: {', '.join(item['colors'])}. {item['layout']}."
 
-            full_prompt = f"Create a professional print-on-demand {item['product_type']} graphic design. {img_prompt}. The design should be print-ready, high contrast, centered composition, suitable for fabric/product printing. No mockup, just the design artwork itself on a solid or simple background."
-
+            full_prompt = f"Create a professional print-on-demand {item['product_type']} graphic design. {img_prompt}. The design should be print-ready, high contrast, centered composition, suitable for fabric/product printing. IMPORTANT: Transparent background, no background at all. Just the design artwork isolated with no background."
             images = await image_gen.generate_images(
                 prompt=full_prompt,
                 model="gpt-image-1",
                 number_of_images=1
             )
             if images and len(images) > 0:
-                img_b64 = base64.b64encode(images[0]).decode('utf-8')
+                # Remove background before storing
+                image_bytes = await _remove_background(images[0])
+                img_b64 = base64.b64encode(image_bytes).decode('utf-8')
                 await db.design_images.insert_one({
                     "design_id": design_id,
                     "image_base64": img_b64,
