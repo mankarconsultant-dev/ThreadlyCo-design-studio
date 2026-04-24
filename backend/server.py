@@ -25,8 +25,7 @@ import httpx
 from datetime import datetime, timezone, timedelta
 from pydantic import BaseModel, Field
 from typing import List, Optional
-from emergentintegrations.llm.chat import LlmChat, UserMessage
-from emergentintegrations.llm.openai.image_generation import OpenAIImageGeneration
+from openai import AsyncOpenAI
 import base64
 import asyncio
 from rembg import remove as rembg_remove
@@ -36,7 +35,7 @@ MONGO_URL = os.environ['MONGO_URL']
 DB_NAME = os.environ['DB_NAME']
 JWT_SECRET = os.environ['JWT_SECRET']
 JWT_ALGORITHM = "HS256"
-EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
 ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin@threadlyco.com')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'ThreadlyAdmin2024!')
 
@@ -294,7 +293,7 @@ async def generate_designs(req: GenerateDesignsRequest, user: dict = Depends(get
     Returns concepts immediately. Then kicks off background image generation.
     Frontend polls /api/designs/{id}/image to check when images are ready.
     """
-    if not EMERGENT_LLM_KEY:
+    if not OPENAI_API_KEY:
         raise HTTPException(status_code=500, detail="AI API key not configured")
 
     prompt = f"""You are a professional print-on-demand designer specializing in Gen Z and Gen Alpha trends.
@@ -316,15 +315,17 @@ Return ONLY valid JSON array with exactly 5 objects. Each object must have:
 Return ONLY the JSON array, no markdown, no explanation."""
 
     try:
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"design-gen-{uuid.uuid4()}",
-            system_message="You are a design generation AI. Return only valid JSON arrays."
-        )
-        chat.with_model("anthropic", "claude-4-sonnet-20250514")
+        openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-        user_message = UserMessage(text=prompt)
-        response_text = await chat.send_message(user_message)
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a design generation AI. Return only valid JSON arrays."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.8
+        )
+        response_text = response.choices[0].message.content
 
         cleaned = response_text.strip()
         if cleaned.startswith("```"):
@@ -406,7 +407,7 @@ async def _remove_background(image_bytes: bytes) -> bytes:
 async def _generate_images_background(design_items: list):
     """Background task: generate AI images for each design and store in MongoDB."""
     logger.info(f"Background: Starting image generation for {len(design_items)} designs...")
-    image_gen = OpenAIImageGeneration(api_key=EMERGENT_LLM_KEY)
+    openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
     async def generate_one(item):
         design_id = item["id"]
@@ -417,14 +418,18 @@ async def _generate_images_background(design_items: list):
 
             full_prompt = f"Create a professional print-on-demand {item['product_type']} graphic design. {img_prompt}. The design should be print-ready, high contrast, centered composition, suitable for fabric/product printing. IMPORTANT: Pure white background only (#FFFFFF). No mockup, no shadows, no gradients in background. Just the flat design artwork on a solid white background."
 
-            images = await image_gen.generate_images(
+            response = await openai_client.images.generate(
+                model="dall-e-3",
                 prompt=full_prompt,
-                model="gpt-image-1",
-                number_of_images=1
+                n=1,
+                size="1024x1024",
+                response_format="b64_json"
             )
-            if images and len(images) > 0:
+
+            if response.data and len(response.data) > 0:
+                image_bytes = base64.b64decode(response.data[0].b64_json)
                 # Remove background → produces transparent PNG for clean Printify upload
-                image_bytes = await _remove_background(images[0])
+                image_bytes = await _remove_background(image_bytes)
                 img_b64 = base64.b64encode(image_bytes).decode('utf-8')
                 await db.design_images.insert_one({
                     "design_id": design_id,
